@@ -1,0 +1,5 @@
+{
+  "name": "IELTS Writing Coach AI",
+  "description": "An advanced IELTS writing evaluation tool that provides detailed feedback and band scores based on official criteria using Gemini 3 Pro.",
+  "requestFramePermissions": []
+}
