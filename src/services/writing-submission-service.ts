@@ -34,10 +34,19 @@ export async function checkQuota(user: User): Promise<{
 }> {
   const [dailyUsed, monthlyUsed] = await Promise.all([
     prisma.writingSubmission.count({
-      where: { userId: user.id, createdAt: { gte: startOfToday() } },
+      where: {
+        userId: user.id,
+        createdAt: { gte: startOfToday() },
+        // System-side failures don't consume quota (section 8, rule 4).
+        status: { not: "FAILED" },
+      },
     }),
     prisma.writingSubmission.count({
-      where: { userId: user.id, createdAt: { gte: startOfMonth() } },
+      where: {
+        userId: user.id,
+        createdAt: { gte: startOfMonth() },
+        status: { not: "FAILED" },
+      },
     }),
   ]);
   return {
