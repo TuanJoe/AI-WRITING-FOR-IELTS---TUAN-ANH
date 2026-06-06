@@ -1,0 +1,357 @@
+// AI IELTS Writing Scorer — Prisma schema
+// PostgreSQL. Every AI request/response, token usage and cost is persisted.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Role {
+  STUDENT
+  TEACHER
+  SUPPORT
+  PRODUCT_ADMIN
+  FINANCE_ADMIN
+  SUPER_ADMIN
+}
+
+enum TaskType {
+  TASK_1
+  TASK_2
+}
+
+enum SubmissionStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum PromptStatus {
+  DRAFT
+  TESTING
+  PUBLISHED
+  DEPRECATED
+  ARCHIVED
+}
+
+enum ValidationStatus {
+  VALID
+  REPAIRED
+  INVALID
+}
+
+enum UsageStatus {
+  SUCCESS
+  FAILED
+}
+
+enum Severity {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+// ---------------------------------------------------------------------------
+// Core / auth
+// ---------------------------------------------------------------------------
+
+model User {
+  id               String    @id @default(cuid())
+  email            String    @unique
+  passwordHash     String?
+  authProvider     String? // e.g. "credentials", "google"
+  name             String?
+  role             Role      @default(STUDENT)
+  subscriptionPlan String    @default("FREE")
+  dailyQuota       Int       @default(5)
+  monthlyQuota     Int       @default(100)
+  isActive         Boolean   @default(true)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  lastLoginAt      DateTime?
+
+  submissions WritingSubmission[]
+  usageLogs   AIUsageLog[]
+  auditLogs   AdminAuditLog[]     @relation("AdminAuditActor")
+
+  @@index([role])
+  @@index([email])
+}
+
+// ---------------------------------------------------------------------------
+// Submissions & scoring
+// ---------------------------------------------------------------------------
+
+model WritingSubmission {
+  id             String           @id @default(cuid())
+  userId         String
+  taskType       TaskType
+  questionPrompt String
+  essayText      String
+  wordCount      Int
+  status         SubmissionStatus @default(PENDING)
+  adminNotes     String?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  completedAt    DateTime?
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  scoringResult ScoringResult?
+  usageLogs     AIUsageLog[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([taskType])
+  @@index([createdAt])
+}
+
+model ScoringResult {
+  id           String   @id @default(cuid())
+  submissionId String   @unique
+  provider     String
+  modelName    String
+  promptId     String?
+  promptVersion String?
+
+  overallBand    Float
+  overallBandRaw Float
+
+  // Task 1 uses taskAchievement, Task 2 uses taskResponse (the other is null).
+  taskAchievementScore Float?
+  taskResponseScore    Float?
+  coherenceAndCohesionScore        Float
+  lexicalResourceScore             Float
+  grammaticalRangeAndAccuracyScore Float
+
+  resultJson       Json // normalized, validated structured output
+  rawModelOutput   String // raw text returned by the model (for debugging)
+  validationStatus ValidationStatus @default(VALID)
+  modelConfidence  String?
+
+  createdAt DateTime @default(now())
+
+  submission       WritingSubmission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  prompt           AIPrompt?         @relation(fields: [promptId], references: [id])
+  errorCorrections ErrorCorrection[]
+
+  @@index([promptId])
+  @@index([overallBand])
+}
+
+model ErrorCorrection {
+  id              String   @id @default(cuid())
+  scoringResultId String
+  criterion       String
+  subcriterion    String?
+  tag             String
+  severity        Severity @default(MEDIUM)
+  paragraphIndex  Int?
+  sentenceIndex   Int?
+  originalText    String
+  correctedText   String
+  explanation     String
+  impactOnScore   String?
+  suggestedLearningFocus String?
+  createdAt       DateTime @default(now())
+
+  scoringResult ScoringResult @relation(fields: [scoringResultId], references: [id], onDelete: Cascade)
+
+  @@index([scoringResultId])
+  @@index([tag])
+}
+
+// ---------------------------------------------------------------------------
+// Prompt CMS
+// ---------------------------------------------------------------------------
+
+model AIPrompt {
+  id                 String       @id @default(cuid())
+  name               String
+  code               String // logical family code, shared across versions
+  version            String
+  taskType           TaskType?
+  modelProvider      String       @default("gemini")
+  modelName          String
+  systemInstruction  String
+  userPromptTemplate String
+  outputSchema       Json?
+  generationConfig   Json?
+  status             PromptStatus @default(DRAFT)
+  isDefault          Boolean      @default(false)
+  createdBy          String?
+  updatedBy          String?
+  publishedBy        String?
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+  publishedAt        DateTime?
+
+  scoringResults ScoringResult[]
+  testRuns       PromptTestRun[]
+
+  @@unique([code, version])
+  @@index([code])
+  @@index([status])
+  @@index([taskType])
+}
+
+model PromptTestRun {
+  id                 String   @id @default(cuid())
+  promptId           String
+  testName           String?
+  sampleSubmissionId String?
+  inputPayload       Json
+  outputPayload      Json?
+  expectedScore      Float?
+  actualScore        Float?
+  scoreDiff          Float?
+  inputTokens        Int      @default(0)
+  outputTokens       Int      @default(0)
+  totalTokens        Int      @default(0)
+  estimatedCostUsd   Float    @default(0)
+  estimatedCostVnd   Float    @default(0)
+  latencyMs          Int      @default(0)
+  status             String   @default("SUCCESS")
+  createdBy          String?
+  createdAt          DateTime @default(now())
+
+  prompt AIPrompt @relation(fields: [promptId], references: [id], onDelete: Cascade)
+
+  @@index([promptId])
+}
+
+// ---------------------------------------------------------------------------
+// AI usage, cost & pricing
+// ---------------------------------------------------------------------------
+
+model AIUsageLog {
+  id              String      @id @default(cuid())
+  userId          String?
+  submissionId    String?
+  scoringResultId String?
+  provider        String
+  modelName       String
+  promptId        String?
+  promptVersion   String?
+
+  inputTokens       Int @default(0)
+  outputTokens      Int @default(0)
+  cachedInputTokens Int @default(0)
+  thinkingTokens    Int @default(0)
+  totalTokens       Int @default(0)
+
+  inputCostUsd    Float @default(0)
+  outputCostUsd   Float @default(0)
+  cachedCostUsd   Float @default(0)
+  thinkingCostUsd Float @default(0)
+  totalCostUsd    Float @default(0)
+
+  exchangeRateUsdVnd Float @default(0)
+  totalCostVnd       Float @default(0)
+
+  latencyMs    Int         @default(0)
+  status       UsageStatus @default(SUCCESS)
+  errorCode    String?
+  errorMessage String?
+  requestId    String?
+  createdAt    DateTime    @default(now())
+
+  user       User?              @relation(fields: [userId], references: [id], onDelete: SetNull)
+  submission WritingSubmission? @relation(fields: [submissionId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([submissionId])
+  @@index([modelName])
+  @@index([promptVersion])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model AIModelPricing {
+  id                          String    @id @default(cuid())
+  provider                    String
+  modelName                   String
+  currency                    String    @default("USD")
+  inputPricePer1mTokens       Float
+  outputPricePer1mTokens      Float
+  cachedInputPricePer1mTokens Float     @default(0)
+  effectiveFrom               DateTime  @default(now())
+  effectiveTo                 DateTime?
+  sourceUrl                   String?
+  createdBy                   String?
+  createdAt                   DateTime  @default(now())
+
+  @@index([provider, modelName])
+  @@index([effectiveFrom])
+}
+
+model ExchangeRate {
+  id            String   @id @default(cuid())
+  baseCurrency  String   @default("USD")
+  targetCurrency String  @default("VND")
+  rate          Float
+  source        String?
+  effectiveDate DateTime @default(now())
+  createdAt     DateTime @default(now())
+
+  @@index([baseCurrency, targetCurrency, effectiveDate])
+}
+
+// ---------------------------------------------------------------------------
+// Admin operations
+// ---------------------------------------------------------------------------
+
+model AdminAuditLog {
+  id          String   @id @default(cuid())
+  adminUserId String?
+  action      String
+  entityType  String?
+  entityId    String?
+  beforeValue Json?
+  afterValue  Json?
+  ipAddress   String?
+  userAgent   String?
+  createdAt   DateTime @default(now())
+
+  admin User? @relation("AdminAuditActor", fields: [adminUserId], references: [id], onDelete: SetNull)
+
+  @@index([adminUserId])
+  @@index([action])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+}
+
+model FeatureFlag {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  value       String
+  description String?
+  isActive    Boolean  @default(true)
+  updatedBy   String?
+  updatedAt   DateTime @updatedAt
+}
+
+model AIModelRoutingRule {
+  id               String   @id @default(cuid())
+  planCode         String   @default("FREE")
+  taskType         TaskType?
+  featureCode      String   @default("scoring")
+  provider         String   @default("gemini")
+  modelName        String
+  promptId         String?
+  generationConfig Json?
+  priority         Int      @default(100)
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([planCode, taskType, featureCode, isActive])
+}
